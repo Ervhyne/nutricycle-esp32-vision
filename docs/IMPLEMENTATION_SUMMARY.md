@@ -248,7 +248,7 @@ The system is fully functional and ready to test. Simply:
 **Frontend:** Open `frontend/index.html`
 **Logs:** `backend/logs/detections_*.json`
 **API Base:** `http://localhost:5000`
-**Video Feed:** `http://localhost:5000/video_feed`
+**Video Feed:** `http://localhost:3000/video_feed` (via Node gateway proxy to private Python server)
 
 **Documentation:**
 - Main guide: [GET_STARTED.md](GET_STARTED.md)

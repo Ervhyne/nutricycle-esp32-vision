@@ -188,6 +188,14 @@
             object-fit: contain;
             display: block;
         }
+        #overlayCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
         
         /* Responsive breakpoints for different screen sizes */
         @media (max-width: 1200px) {
@@ -528,6 +536,7 @@
             <div class="video-section">
                 <div class="video-container">
                     <img id="videoFeed" src="about:blank" alt="Video Feed">
+                    <canvas id="overlayCanvas" aria-hidden="true"></canvas>
                     <div class="status-badge inactive" id="statusBadge">Inactive</div>
                     <!-- Network Status Indicator -->
                     <div class="network-status" id="networkStatus">
@@ -615,6 +624,8 @@
         </div>
     </div>
 
+    <!-- Socket.IO client (for realtime detections) -->
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js" integrity="sha384-0896Zp8R0qkq7eGZr7YxDWcM3b7p9o3yWZ1QkZr9GQKcF8x4mFJ5j8K6C3Y5p3g9" crossorigin="anonymous"></script>
     <script src="js/main.js"></script>
 </body>
 </html>

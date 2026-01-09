@@ -1,13 +1,16 @@
 // NutriCycle Frontend - Main JavaScript
 // Handles video streaming and statistics updates
 
-const API_BASE_URL = 'http://localhost:5000';
+const API_BASE_URL = 'http://localhost:3000';
 let isDetectionActive = false;
 let statsUpdateInterval = null;
 let streamStatusInterval = null;
 let batchHistoryInterval = null;
 let isBatchActive = false;
 
+let overlayCanvas = null;
+let overlayCtx = null;
+let socket = null; // Socket.IO client instance (realtime detections)
 // Theme management
 const THEME_STORAGE_KEY = 'nutricycle-theme';
 
@@ -141,12 +144,127 @@ async function resetStats() {
 }
 
 // Start video stream
+// Uses Node gateway `/video_feed` proxy to fetch MJPEG stream from the private Python server
 function startVideoStream() {
     const videoFeed = document.getElementById('videoFeed');
     videoFeed.src = `${API_BASE_URL}/video_feed?t=${Date.now()}`;
     videoFeed.onerror = function() {
         console.error('Error loading video stream');
     };
+
+    // Initialize overlay canvas for bounding boxes
+    initOverlay();
+    connectSocket();
+}
+
+// Stop video stream
+function stopVideoStream() {
+    const videoFeed = document.getElementById('videoFeed');
+    videoFeed.src = 'about:blank';
+
+    disconnectSocket();
+    if (overlayCtx && overlayCanvas) overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+}
+
+// Initialize overlay canvas and event handlers
+function initOverlay() {
+    overlayCanvas = document.getElementById('overlayCanvas');
+    overlayCtx = overlayCanvas ? overlayCanvas.getContext('2d') : null;
+    const videoFeed = document.getElementById('videoFeed');
+
+    function updateOverlaySize() {
+        if (!overlayCanvas || !videoFeed) return;
+        // Use client size for drawing (matches displayed element)
+        overlayCanvas.width = videoFeed.clientWidth;
+        overlayCanvas.height = videoFeed.clientHeight;
+    }
+
+    // Update size on load and resize
+    window.addEventListener('resize', updateOverlaySize);
+    videoFeed.addEventListener('load', updateOverlaySize);
+    updateOverlaySize();
+}
+
+// (Removed) Detection polling via repeated /detect uploads. The frontend now relies on realtime `detections` events broadcast by the Node gateway via Socket.IO.
+
+// Draw detections onto the overlay canvas (scales from source image to displayed canvas)
+function drawDetections(detections) {
+    if (!overlayCanvas || !overlayCtx) return;
+
+    // Clear overlay
+    overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+    // Determine source image size from video element
+    const videoFeed = document.getElementById('videoFeed');
+    const srcWidth = videoFeed && (videoFeed.naturalWidth || videoFeed.videoWidth) ? (videoFeed.naturalWidth || videoFeed.videoWidth) : overlayCanvas.width;
+    const srcHeight = videoFeed && (videoFeed.naturalHeight || videoFeed.videoHeight) ? (videoFeed.naturalHeight || videoFeed.videoHeight) : overlayCanvas.height;
+
+    // Avoid division by zero
+    const scaleX = srcWidth ? (overlayCanvas.width / srcWidth) : 1;
+    const scaleY = srcHeight ? (overlayCanvas.height / srcHeight) : 1;
+
+    // Color map for waste types
+    const colorMap = {
+        'leafy_vegetables': '#16a34a',
+        'plastic': '#dc2626',
+        'metal': '#ea580c',
+        'paper': '#eab308',
+        'unknown': '#6b7280'
+    };
+
+    detections.forEach(d => {
+        const bbox = d.bbox || [0,0,0,0];
+        const x1 = Math.round(bbox[0] * scaleX);
+        const y1 = Math.round(bbox[1] * scaleY);
+        const x2 = Math.round(bbox[2] * scaleX);
+        const y2 = Math.round(bbox[3] * scaleY);
+        const w = x2 - x1;
+        const h = y2 - y1;
+        const color = colorMap[d.type] || '#ffffff';
+
+        // Draw box
+        overlayCtx.strokeStyle = color;
+        overlayCtx.lineWidth = Math.max(2, Math.round(overlayCanvas.width / 200));
+        overlayCtx.strokeRect(x1, y1, w, h);
+
+        // Draw label background
+        const label = `${d.original_class} ${(d.confidence * 100).toFixed(0)}%`;
+        overlayCtx.font = `${Math.max(12, Math.round(overlayCanvas.width / 60))}px Arial`;
+        const textWidth = overlayCtx.measureText(label).width + 8;
+        const textHeight = Math.max(14, Math.round(overlayCanvas.width / 80));
+        overlayCtx.fillStyle = color;
+        overlayCtx.fillRect(x1, y1 - textHeight - 6, textWidth, textHeight + 4);
+
+        // Text
+        overlayCtx.fillStyle = '#ffffff';
+        overlayCtx.fillText(label, x1 + 4, y1 - 6);
+    });
+}
+
+// Socket.IO helpers
+function connectSocket() {
+    if (socket && socket.connected) return;
+    try {
+        socket = io(API_BASE_URL);
+        socket.on('connect', () => console.log('Socket connected:', socket.id));
+        socket.on('detections', (data) => {
+            const detections = data && data.detections ? data.detections : (Array.isArray(data) ? data : []);
+            drawDetections(detections);
+        });
+        socket.on('disconnect', () => console.log('Socket disconnected'));
+    } catch (err) {
+        console.error('Socket init failed', err);
+    }
+}
+
+function disconnectSocket() {
+    if (!socket) return;
+    try {
+        socket.disconnect();
+    } catch (err) {
+        console.warn('Socket disconnect error', err);
+    }
+    socket = null;
 }
 
 // Stop video stream

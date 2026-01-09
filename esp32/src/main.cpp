@@ -5,6 +5,7 @@
 // Select camera model
 // ===========================
 #include "board_config.h"
+#include "uploader.h"
 
 // ===========================
 // Enter your WiFi credentials
@@ -17,6 +18,7 @@ const char *password = "0909123jab";
 
 void startCameraServer();
 void setupLedFlash();
+void startUploaderTask();
 
 
 
@@ -106,6 +108,10 @@ void setup() {
   Serial.print("Camera Ready! Use 'http://");
   Serial.print(WiFi.localIP());
   Serial.println("' to connect");
+
+  // Start optional uploader task which posts captured frames to the Node.js gateway
+  // (uploader can be configured in src/uploader_config.h)
+  startUploaderTask();
 }
 
 void loop() {

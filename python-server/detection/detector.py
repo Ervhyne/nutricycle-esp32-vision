@@ -77,16 +77,17 @@ class WasteDetector:
         else:
             return 'unknown'
     
-    def detect(self, frame, filter_non_vegetables=True):
+    def detect(self, frame, filter_non_vegetables=True, draw=True):
         """
         Run detection on a frame
         
         Args:
             frame: OpenCV image (BGR format)
             filter_non_vegetables: If True, only show non-vegetable items (contamination tracking)
+            draw: If True, returns an annotated frame; if False, skips drawing and returns raw frame copy
             
         Returns:
-            annotated_frame: Frame with bounding boxes
+            annotated_frame: Frame with bounding boxes (or raw frame copy when draw=False)
             detections: List of detection dictionaries
         """
         if self.model is None:
@@ -133,34 +134,35 @@ class WasteDetector:
             # Show all detections
             filtered_detections = all_detections
         
-        # Draw bounding boxes for filtered detections only
-        for detection in filtered_detections:
-            x1, y1, x2, y2 = detection['bbox']
-            waste_type = detection['type']
-            confidence = detection['confidence']
-            class_name = detection['original_class']
-            
-            # Draw bounding box
-            color = self.get_color_for_type(waste_type)
-            cv2.rectangle(annotated_frame, 
-                         (int(x1), int(y1)), 
-                         (int(x2), int(y2)), 
-                         color, 3)  # Thicker box for visibility
-            
-            # Draw label with confidence percentage
-            label = f"{class_name} {confidence:.0%}"
-            label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-            
-            # Background for label
-            cv2.rectangle(annotated_frame,
-                        (int(x1), int(y1) - label_size[1] - 12),
-                        (int(x1) + label_size[0] + 10, int(y1)),
-                        color, -1)
-            
-            # Label text
-            cv2.putText(annotated_frame, label,
-                      (int(x1) + 5, int(y1) - 5),
-                      cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        # Only draw bounding boxes if requested (frontend will handle drawing in new architecture)
+        if draw:
+            for detection in filtered_detections:
+                x1, y1, x2, y2 = detection['bbox']
+                waste_type = detection['type']
+                confidence = detection['confidence']
+                class_name = detection['original_class']
+                
+                # Draw bounding box
+                color = self.get_color_for_type(waste_type)
+                cv2.rectangle(annotated_frame, 
+                             (int(x1), int(y1)), 
+                             (int(x2), int(y2)), 
+                             color, 3)  # Thicker box for visibility
+                
+                # Draw label with confidence percentage
+                label = f"{class_name} {confidence:.0%}"
+                label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                
+                # Background for label
+                cv2.rectangle(annotated_frame,
+                            (int(x1), int(y1) - label_size[1] - 12),
+                            (int(x1) + label_size[0] + 10, int(y1)),
+                            color, -1)
+                
+                # Label text
+                cv2.putText(annotated_frame, label,
+                          (int(x1) + 5, int(y1) - 5),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
         return annotated_frame, filtered_detections
     

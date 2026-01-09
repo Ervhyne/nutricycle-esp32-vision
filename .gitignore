@@ -58,3 +58,4 @@ data/
 *.tmp
 *.log
 *.cache
+/node-server/node_modules

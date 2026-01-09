@@ -3,7 +3,7 @@ NutriCycle Backend - Detection Pipeline
 Flask backend for real-time waste detection with webcam
 """
 
-from flask import Flask, Response, jsonify, render_template
+from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 import cv2
 import numpy as np
@@ -12,19 +12,148 @@ import time
 from datetime import datetime
 from detection.detector import WasteDetector, WebcamCapture, ESP32StreamCapture
 from detection.logger import DetectionLogger
+
+# Config (with sensible defaults if config.py missing)
 try:
     from config import *
-except ImportError:
-    # Default configuration if config.py doesn't exist
+except Exception:
     USE_ESP32 = True
-    ESP32_STREAM_URL = "http://192.168.1.17/stream"
+    ESP32_STREAM_URL = "http://192.168.1.17:81/stream"
     MODEL_PATH = 'backend/models/best.pt'
     CONFIDENCE_THRESHOLD = 0.5
     FILTER_NON_VEGETABLES = True
     MAX_BATCH_HISTORY = 10
-    HOST = '0.0.0.0'
+    HOST = '127.0.0.1'
     PORT = 5000
     DEBUG = False
+
+# Create Flask app early so decorators below work
+app = Flask(__name__)
+CORS(app)
+
+def detection_loop():
+    """Main detection loop running in background thread (no server-side drawing)
+    The detector runs on every Nth frame and returns detection metadata only. Frames streamed
+    to `/video_feed` are raw frames (no annotations)."""
+    global output_frame, lock, detection_active, frame_count, detector, stream_capture, logger
+    global batch_active, batch_detections
+    
+    error_frame = None  # Cache error frame
+    skip_frames = 14  # Process every 15th frame for better FPS on older CPUs
+    frame_counter = 0
+    last_raw_frame = None
+    
+    while detection_active:
+        # Read frame from stream
+        success, frame = stream_capture.read()
+        
+        if not success:
+            print("Failed to read frame from stream")
+            
+            # Create error frame with reconnection message
+            if error_frame is None:
+                error_frame = create_error_frame("ESP32 Connection Lost", "Reconnecting...")
+            
+            with lock:
+                output_frame = error_frame.copy()
+            
+            time.sleep(1)
+            continue
+        
+        # Clear error frame on successful read
+        error_frame = None
+        
+        # Only run detection every Nth frame to improve FPS
+        if frame_counter % (skip_frames + 1) == 0:
+            # Reset statistics before each detection to show current frame only (not cumulative)
+            detector.reset_statistics()
+            
+            # Resize frame for faster inference
+            inference_frame = cv2.resize(frame, (320, 320))
+            
+            # Run detection without drawing (returns metadata only)
+            _unused_frame, detections = detector.detect(inference_frame, filter_non_vegetables=FILTER_NON_VEGETABLES, draw=False)
+            
+            # Log detections if any found
+            if detections:
+                logger.log_detection(detections, frame_id=frame_count)
+                
+                # Add to batch if active
+                if batch_active:
+                    batch_detections.extend(detections)
+        
+        # Use raw frame for streaming (no server-side annotation)
+        with lock:
+            output_frame = frame.copy()
+            last_raw_frame = frame.copy()
+        
+        frame_count += 1
+        frame_counter += 1
+        
+        # Small delay to prevent CPU overload
+        time.sleep(0.05)  # ~20 FPS target
+
+@app.route('/detect', methods=['POST'])
+def detect_image():
+    """Detect objects from an uploaded image and return JSON metadata.
+    Accepts multipart/form-data with `image` file or raw image bytes in the body.
+    This handler now includes diagnostics and error handling to help trace 500/no-response cases.
+    """
+    if detector is None:
+        return jsonify({"error": "Detector not initialized"}), 500
+
+    start_time = time.time()
+    try:
+        # Read image from multipart/form-data (`image`) or raw bytes
+        if 'image' in request.files:
+            file = request.files['image']
+            data = file.read()
+        else:
+            data = request.get_data()
+
+        # Quick diagnostics
+        try:
+            req_size = len(data) if data is not None else 0
+            client_ip = request.remote_addr or request.headers.get('X-Forwarded-For', 'unknown')
+            print(f"[detect] request from {client_ip}, {req_size} bytes")
+        except Exception as _:
+            pass
+
+        arr = np.frombuffer(data, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+        if img is None:
+            return jsonify({"error": "invalid_image"}), 400
+
+        # Resize to model input size for faster inference
+        inference_frame = cv2.resize(img, (320, 320))
+        _unused, detections = detector.detect(inference_frame, filter_non_vegetables=FILTER_NON_VEGETABLES, draw=False)
+
+        # Scale bounding boxes back to original image size
+        width_scale = img.shape[1] / 320.0
+        height_scale = img.shape[0] / 320.0
+        scaled = []
+        for d in detections:
+            x1, y1, x2, y2 = d['bbox']
+            sx1 = int(x1 * width_scale)
+            sx2 = int(x2 * width_scale)
+            sy1 = int(y1 * height_scale)
+            sy2 = int(y2 * height_scale)
+            d_copy = d.copy()
+            d_copy['bbox'] = [sx1, sy1, sx2, sy2]
+            scaled.append(d_copy)
+
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        print(f"[detect] processed in {elapsed_ms} ms, detections={len(scaled)}")
+
+        return jsonify({"detections": scaled})
+    except Exception as e:
+        # Log full exception for debugging
+        import traceback
+        traceback.print_exc()
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        print(f"[detect] error after {elapsed_ms} ms: {e}")
+        return jsonify({"error": "internal_error", "details": str(e)}), 500
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend communication
@@ -75,71 +204,7 @@ def initialize_system():
     
     print("System initialized successfully!")
 
-def detection_loop():
-    """Main detection loop running in background thread"""
-    global output_frame, lock, detection_active, frame_count, detector, stream_capture, logger
-    global batch_active, batch_detections
-    
-    error_frame = None  # Cache error frame
-    skip_frames = 14  # Process every 15th frame for better FPS on older CPUs
-    frame_counter = 0
-    last_annotated_frame = None
-    
-    while detection_active:
-        # Read frame from stream
-        success, frame = stream_capture.read()
-        
-        if not success:
-            print("Failed to read frame from stream")
-            
-            # Create error frame with reconnection message
-            if error_frame is None:
-                error_frame = create_error_frame("ESP32 Connection Lost", "Reconnecting...")
-            
-            with lock:
-                output_frame = error_frame.copy()
-            
-            time.sleep(1)
-            continue
-        
-        # Clear error frame on successful read
-        error_frame = None
-        
-        # Only run detection every Nth frame to improve FPS
-        if frame_counter % (skip_frames + 1) == 0:
-            # Reset statistics before each detection to show current frame only (not cumulative)
-            detector.reset_statistics()
-            
-            # Resize frame for faster inference (smaller = faster on i5-3470)
-            inference_frame = cv2.resize(frame, (320, 320))
-            
-            # Run detection (filter based on configuration)
-            annotated_inference, detections = detector.detect(inference_frame, filter_non_vegetables=FILTER_NON_VEGETABLES)
-            
-            # Scale detections back to original frame size
-            annotated_frame = cv2.resize(annotated_inference, (frame.shape[1], frame.shape[0]))
-            last_annotated_frame = annotated_frame
-            
-            # Log detections if any found
-            if detections:
-                logger.log_detection(detections, frame_id=frame_count)
-                
-                # Add to batch if active
-                if batch_active:
-                    batch_detections.extend(detections)
-        else:
-            # Use last annotated frame or raw frame
-            annotated_frame = last_annotated_frame if last_annotated_frame is not None else frame
-        
-        # Update output frame
-        with lock:
-            output_frame = annotated_frame.copy()
-        
-        frame_count += 1
-        frame_counter += 1
-        
-        # Small delay to prevent CPU overload
-        time.sleep(0.05)  # ~20 FPS target
+# detection loop implementation moved earlier to avoid server-side drawing. See top of file for updated `detection_loop()`.
 
 
 def create_error_frame(title, message):

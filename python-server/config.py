@@ -15,6 +15,6 @@ FILTER_NON_VEGETABLES = True  # Only show non-vegetable items (contamination tra
 MAX_BATCH_HISTORY = 10  # Number of batch records to keep in memory
 
 # Server Configuration
-HOST = '0.0.0.0'
+HOST = '127.0.0.1'
 PORT = 5000
 DEBUG = False
