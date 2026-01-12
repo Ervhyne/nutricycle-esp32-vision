@@ -22,6 +22,20 @@ async function upload(req, res) {
       const deviceStreamStore = require('../services/deviceStreamStore');
       const streamHeader = req.header('x-stream-url') || req.header('x-forwarded-stream-url');
       const deviceIdHeader = req.header('x-device-id') || null;
+      const rssiHeader = req.header('x-rssi') || req.header('x-device-rssi') || null;
+
+      // Store RSSI if provided
+      try {
+        if (rssiHeader && deviceIdHeader) {
+          deviceStreamStore.setRssiByDeviceId(deviceIdHeader, Number(rssiHeader));
+        } else if (rssiHeader) {
+          const ipKey = req.ip || req.connection.remoteAddress || null;
+          if (ipKey) deviceStreamStore.setRssiByIp(ipKey, Number(rssiHeader));
+        }
+      } catch (e) {
+        console.warn('[upload] failed to set RSSI', e && e.message ? e.message : e);
+      }
+
       if (streamHeader && /^https?:\/\//.test(streamHeader)) {
         if (deviceIdHeader) {
           deviceStreamStore.set(deviceIdHeader, streamHeader);

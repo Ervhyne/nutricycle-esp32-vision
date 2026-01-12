@@ -1,0 +1,12 @@
+body { background:#0f172a; color:#e6edf3; font-family:Arial,Helvetica,sans-serif; margin:0; padding:20px }
+.app header h1 { margin:0 0 20px 0; }
+main { display:flex; gap:18px; align-items:flex-start; max-width:1000px; margin:0 auto }
+.controls { width:320px }
+.controls input { width:100%; padding:8px; border-radius:6px; border:1px solid #2a3340; background:#0b1220; color:#e6edf3 }
+.controls button { margin-top:8px; padding:8px 12px; border-radius:6px; background:#2563eb; color:white; border:none; cursor:pointer }
+.viewer img { display:block }
+/* Responsive */
+@media (max-width: 900px) {
+  main { flex-direction:column; align-items:center }
+  .controls { width:100%; margin-top:18px }
+}

@@ -46,6 +46,18 @@ function getLocalIPv4Addresses() {
   return results;
 }
 
+// Check for ffmpeg availability for optional HLS feature
+try {
+  const hlsManager = require('./services/hlsManager');
+  if (hlsManager.ffmpegAvailable()) {
+    console.log('[hls] ffmpeg found in PATH — HLS available');
+  } else {
+    console.warn('[hls] ffmpeg not found in PATH — HLS disabled. Install ffmpeg (apt, brew, or download) to enable HLS transcoding');
+  }
+} catch (e) {
+  console.warn('[hls] could not verify ffmpeg availability');
+}
+
 server.listen(port, () => {
   const ips = getLocalIPv4Addresses();
   if (ips.length > 0) {
