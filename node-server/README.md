@@ -30,6 +30,10 @@ socket.on('detections', data => console.log('Detections', data));
 
 Video (MJPEG): open `http://localhost:3000/video_feed` in your browser to view the proxied MJPEG stream from the private Python server.
 
+Mobile snapshot & ngrok testing:
+- The gateway exposes `GET /snapshot` which returns the latest resized (320×320) snapshot uploaded by the ESP32 (useful for mobile apps to poll/refresh cheaply).
+- To test over the internet with ngrok, start ngrok to forward port 3000: `ngrok http 3000` and set your ESP32 `UPLOAD_URL` to `https://<your-ngrok-id>.ngrok.io/upload`. Ensure `API_KEY` matches the device header.
+
 Security notes:
 - Set a strong `API_KEY` before exposing the gateway.
 - Keep `PYTHON_DETECT_URL` pointing at `localhost` so Python is not exposed publicly.

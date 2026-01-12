@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ESP32 Live Feed</title>
+  <style>
+    body { background:#0f172a; color:#e6edf3; font-family:Arial,Helvetica,sans-serif; margin:0; padding:20px; }
+    .wrap { max-width:960px; margin:0 auto; display:flex; gap:18px; align-items:flex-start; }
+    .viewer { flex:1; display:flex; justify-content:center; align-items:center; }
+    img { border-radius:12px; max-width:100%; background:#000; }
+    .controls { width:320px; }
+    input[type=text] { width:100%; padding:8px; border-radius:6px; border:1px solid #2a3340; background:#0b1220; color:#e6edf3 }
+    button { margin-top:8px; padding:8px 12px; border-radius:6px; background:#2563eb; color:white; border:none; cursor:pointer }
+    small { color:#94a3b8 }
+  </style>
+</head>
+<body>
+  <h2>NutriCycle — ESP32 Live Feed</h2>
+  <div class="wrap">
+    <div class="viewer">
+      <img id="stream" src="/device_stream" alt="Live feed" />
+    </div>
+    <div class="controls">
+      <label>ESP32 stream URL (optional)</label>
+      <input id="url" type="text" placeholder="http://192.168.4.1:81/stream" />
+      <button id="apply">Use URL</button>
+      <label style="display:block;margin-top:8px">Device IP (optional)</label>
+      <input id="target_ip" type="text" placeholder="192.168.1.15" />
+      <button id="useIp">Use Device IP (proxy)</button>
+      <button id="direct" style="background:#10b981">Use default /device_stream</button>
+      <p><small>Tip: you can set the env var <code>ESP32_STREAM_URL</code> on the gateway (or paste a URL above).</small></p>
+      <p><small>If you see errors, check gateway logs (Node) for proxy errors and ensure the device is reachable.</small></p>
+    </div>
+  </div>
+
+  <script>
+    const img = document.getElementById('stream');
+    const urlInput = document.getElementById('url');
+    document.getElementById('apply').onclick = () => {
+      const v = urlInput.value.trim();
+      if (!v) return alert('Enter a stream URL first');
+      img.src = '/device_stream?url=' + encodeURIComponent(v) + '&_t=' + Date.now();
+    };
+    document.getElementById('direct').onclick = () => {
+      img.src = '/device_stream?_t=' + Date.now();
+      urlInput.value = '';
+    };
+
+    // Hooks
+    document.getElementById('useIp').onclick = () => {
+      const ip = document.getElementById('target_ip').value.trim();
+      if (!ip) return alert('Enter device IP first');
+      img.src = '/device_stream?target_ip=' + encodeURIComponent(ip) + '&_t=' + Date.now();
+    };
+
+    // Refresh image periodically to keep connection healthy in some browsers
+    let heartbeat = setInterval(() => {
+      img.src = img.src.split('&_t=')[0] + '&_t=' + Date.now();
+    }, 20000);
+  </script>
+</body>
+</html>

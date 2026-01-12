@@ -17,11 +17,47 @@ async function upload(req, res) {
     try {
       const ip = req.ip || req.connection.remoteAddress || 'unknown';
       console.log(`[upload] incoming from ${ip} - size=${buffer.length} bytes - headers=${JSON.stringify(req.headers)}`);
+
+      // If the uploader provided an explicit stream URL (e.g., ngrok or router IP), register it
+      const deviceStreamStore = require('../services/deviceStreamStore');
+      const streamHeader = req.header('x-stream-url') || req.header('x-forwarded-stream-url');
+      const deviceIdHeader = req.header('x-device-id') || null;
+      if (streamHeader && /^https?:\/\//.test(streamHeader)) {
+        if (deviceIdHeader) {
+          deviceStreamStore.set(deviceIdHeader, streamHeader);
+          console.log(`[upload] registered stream URL for device ${deviceIdHeader} -> ${streamHeader}`);
+        } else {
+          // fallback: register by uploader source IP
+          const ipKey = req.ip || req.connection.remoteAddress || null;
+          if (ipKey) {
+            deviceStreamStore.setByIp(ipKey, streamHeader);
+            console.log(`[upload] registered stream URL for ip ${ipKey} -> ${streamHeader}`);
+          }
+        }
+      } else {
+        // If no explicit stream URL, and no mapping exists, we can guess a likely stream URL on the same LAN
+        const ipKey = req.ip || req.connection.remoteAddress || null;
+        if (ipKey && !deviceStreamStore.getByIp(ipKey)) {
+          const guessed = `http://${ipKey}:81/stream`;
+          deviceStreamStore.setByIp(ipKey, guessed);
+          console.log(`[upload] guessed and registered stream URL for ip ${ipKey} -> ${guessed}`);
+        }
+      }
     } catch (e) {
-      console.warn('[upload] diagnostics failed to log headers', e.message || e);
+      console.warn('[upload] diagnostics failed to log headers or register stream', e.message || e);
     }
 
-    const data = await pythonClient.detect(buffer);
+    // Store latest snapshot in memory for mobile/clients (also resize for mobile-friendly size)
+    try {
+      const snapshotStore = require('../services/snapshotStore');
+      const imageResizer = require('../services/imageResizer');
+      const resized = await imageResizer.resizeTo320(buffer);
+      snapshotStore.setLatest(resized, 'image/jpeg');
+    } catch (e) {
+      console.warn('[upload] snapshot store/resizer failed:', e.message || e);
+      try { require('../services/snapshotStore').setLatest(buffer, 'image/jpeg'); } catch (ex) {}
+    }
+    const data = await pythonClient.detect(buffer); // send original to python for best accuracy
 
     // Broadcast detections to connected clients
     sockets.broadcast('detections', data);

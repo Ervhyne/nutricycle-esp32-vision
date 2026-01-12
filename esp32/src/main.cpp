@@ -6,6 +6,8 @@
 // ===========================
 #include "board_config.h"
 #include "uploader.h"
+#include "uploader_settings.h"
+#include "wifi_settings.h"
 
 // ===========================
 // Enter your WiFi credentials
@@ -93,25 +95,72 @@ void setup() {
     s->set_framesize(s, FRAMESIZE_QVGA);
   }
 
-  WiFi.begin(ssid, password);
+  // Initialize WiFi provisioning settings storage
+  wifi_settings_init();
+
+  // Attempt to connect using stored or hard-coded credentials
+  String storedSsid = wifi_get_ssid();
+  String storedPass = wifi_get_pass();
+
+  if (storedSsid.length() > 0) {
+    Serial.printf("Connecting using stored SSID: '%s' (len=%d) pass_len=%d\n", storedSsid.c_str(), (int)storedSsid.length(), (int)storedPass.length());
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(storedSsid.c_str(), storedPass.c_str());
+  } else {
+    Serial.printf("Connecting using hard-coded SSID: '%s'\n", ssid);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+  }
+
   WiFi.setSleep(false);
 
-  while (WiFi.status() != WL_CONNECTED) {
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 15000) {
     delay(500);
     Serial.print(".");
   }
   Serial.println("");
-  Serial.println("WiFi connected");
 
-  startCameraServer();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("WiFi connected");
 
-  Serial.print("Camera Ready! Use 'http://");
-  Serial.print(WiFi.localIP());
-  Serial.println("' to connect");
+    // Start web server so setup is reachable over the LAN
+    startCameraServer();
 
-  // Start optional uploader task which posts captured frames to the Node.js gateway
-  // (uploader can be configured in src/uploader_config.h)
-  startUploaderTask();
+    Serial.print("Camera Ready! Use 'http://");
+    Serial.print(WiFi.localIP());
+    Serial.println("' to connect");
+
+    // If uploader settings are missing, keep the SoftAP available for provisioning
+    uploader_settings_init();
+    // Ensure SoftAP is available for provisioning while STA is active (keeps AP on even when uploader is configured)
+    WiFi.mode(WIFI_AP_STA);
+    const char* apName = "NutriCycle-Setup";
+    WiFi.softAP(apName);
+    Serial.printf("SoftAP '%s' started. Connect to http://192.168.4.1 to configure.\n", apName);
+
+    uploader_settings_init();
+    if (!uploader_is_configured()) {
+      Serial.println("Uploader not configured; waiting for uploader settings (AP active)");
+    } else {
+      // Start optional uploader task which posts captured frames to the Node.js gateway
+      // (uploader can be configured in src/uploader_config.h or via the web UI)
+      Serial.println("Uploader configured; starting uploader task (AP remains active)");
+      startUploaderTask();
+    }
+  } else {
+    Serial.println("WiFi connection failed, starting SoftAP for provisioning...");
+    // Start Soft AP for provisioning
+    WiFi.mode(WIFI_AP);
+    const char* apName = "NutriCycle-Setup";
+    WiFi.softAP(apName);
+    Serial.printf("SoftAP '%s' started. Connect to http://192.168.4.1 to configure.\n", apName);
+
+    // Start web server to allow uploader and wifi settings updates
+    startCameraServer();
+
+    // Do not start uploader until configured
+  }
 }
 
 void loop() {

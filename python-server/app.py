@@ -10,15 +10,16 @@ import numpy as np
 import threading
 import time
 from datetime import datetime
-from detection.detector import WasteDetector, WebcamCapture, ESP32StreamCapture
+from detection.detector import WasteDetector
 from detection.logger import DetectionLogger
 
 # Config (with sensible defaults if config.py missing)
 try:
     from config import *
 except Exception:
-    USE_ESP32 = True
-    ESP32_STREAM_URL = "http://192.168.1.17:81/stream"
+    # Default to uploader-only/detection mode (Node gateway handles uploads & streams)
+    USE_ESP32 = False
+    ESP32_STREAM_URL = None
     MODEL_PATH = 'backend/models/best.pt'
     CONFIDENCE_THRESHOLD = 0.5
     FILTER_NON_VEGETABLES = True
@@ -26,72 +27,30 @@ except Exception:
     HOST = '127.0.0.1'
     PORT = 5000
     DEBUG = False
+    # If False, do not fall back to local webcam when ESP32 is unavailable
+    FALLBACK_TO_WEBCAM = False
+    # If False, do not attempt to auto-connect to ESP32 at startup; rely on uploads instead
+    AUTO_CONNECT_ESP32 = False
+
+# Ensure required config vars exist even if config.py omitted some keys
+USE_ESP32 = globals().get('USE_ESP32', False)
+ESP32_STREAM_URL = globals().get('ESP32_STREAM_URL', None)
+MODEL_PATH = globals().get('MODEL_PATH', 'backend/models/best.pt')
+CONFIDENCE_THRESHOLD = globals().get('CONFIDENCE_THRESHOLD', 0.5)
+FILTER_NON_VEGETABLES = globals().get('FILTER_NON_VEGETABLES', True)
+MAX_BATCH_HISTORY = globals().get('MAX_BATCH_HISTORY', 10)
+HOST = globals().get('HOST', '127.0.0.1')
+PORT = globals().get('PORT', 5000)
+DEBUG = globals().get('DEBUG', False)
+FALLBACK_TO_WEBCAM = globals().get('FALLBACK_TO_WEBCAM', False)
+AUTO_CONNECT_ESP32 = globals().get('AUTO_CONNECT_ESP32', False)
 
 # Create Flask app early so decorators below work
 app = Flask(__name__)
 CORS(app)
 
-def detection_loop():
-    """Main detection loop running in background thread (no server-side drawing)
-    The detector runs on every Nth frame and returns detection metadata only. Frames streamed
-    to `/video_feed` are raw frames (no annotations)."""
-    global output_frame, lock, detection_active, frame_count, detector, stream_capture, logger
-    global batch_active, batch_detections
-    
-    error_frame = None  # Cache error frame
-    skip_frames = 14  # Process every 15th frame for better FPS on older CPUs
-    frame_counter = 0
-    last_raw_frame = None
-    
-    while detection_active:
-        # Read frame from stream
-        success, frame = stream_capture.read()
-        
-        if not success:
-            print("Failed to read frame from stream")
-            
-            # Create error frame with reconnection message
-            if error_frame is None:
-                error_frame = create_error_frame("ESP32 Connection Lost", "Reconnecting...")
-            
-            with lock:
-                output_frame = error_frame.copy()
-            
-            time.sleep(1)
-            continue
-        
-        # Clear error frame on successful read
-        error_frame = None
-        
-        # Only run detection every Nth frame to improve FPS
-        if frame_counter % (skip_frames + 1) == 0:
-            # Reset statistics before each detection to show current frame only (not cumulative)
-            detector.reset_statistics()
-            
-            # Resize frame for faster inference
-            inference_frame = cv2.resize(frame, (320, 320))
-            
-            # Run detection without drawing (returns metadata only)
-            _unused_frame, detections = detector.detect(inference_frame, filter_non_vegetables=FILTER_NON_VEGETABLES, draw=False)
-            
-            # Log detections if any found
-            if detections:
-                logger.log_detection(detections, frame_id=frame_count)
-                
-                # Add to batch if active
-                if batch_active:
-                    batch_detections.extend(detections)
-        
-        # Use raw frame for streaming (no server-side annotation)
-        with lock:
-            output_frame = frame.copy()
-            last_raw_frame = frame.copy()
-        
-        frame_count += 1
-        frame_counter += 1
-        
-        # Small delay to prevent CPU overload
-        time.sleep(0.05)  # ~20 FPS target
+# Removed detection loop and direct stream capture: Python now runs as a detection API only.
+# Devices should POST frames to `/detect` (recommended path): Node gateway will forward uploads to this endpoint.
 
 @app.route('/detect', methods=['POST'])
 def detect_image():
@@ -155,8 +114,7 @@ def detect_image():
         print(f"[detect] error after {elapsed_ms} ms: {e}")
         return jsonify({"error": "internal_error", "details": str(e)}), 500
 
-app = Flask(__name__)
-CORS(app)  # Enable CORS for frontend communication
+# (Flask app already created earlier)  -- duplicate creation removed to preserve registered routes
 
 # Global variables
 detector = None
@@ -171,7 +129,7 @@ frame_count = 0
 batch_active = False
 batch_start_time = None
 batch_detections = []
-batch_history = []  # Store last N batches
+# batch_history removed
 
 def initialize_system():
     """Initialize detector, stream capture, and logger"""
@@ -183,26 +141,9 @@ def initialize_system():
     # Initialize detector with pretrained model (will use custom model when available)
     detector = WasteDetector(model_path=MODEL_PATH, conf_threshold=CONFIDENCE_THRESHOLD)
     
-    # Initialize stream capture (ESP32 or Webcam)
-    if USE_ESP32:
-        print(f"Using ESP32-CAM stream at {ESP32_STREAM_URL}")
-        stream_capture = ESP32StreamCapture(stream_url=ESP32_STREAM_URL)
-        try:
-            stream_capture.start()
-        except Exception as e:
-            print(f"Failed to connect to ESP32: {e}")
-            print("Falling back to webcam...")
-            stream_capture = WebcamCapture(camera_index=0)
-            stream_capture.start()
-    else:
-        print("Using webcam")
-        stream_capture = WebcamCapture(camera_index=0)
-        stream_capture.start()
-    
-    # Initialize logger
+    # Initialize only detection model & logger — Python runs as a detection API (uploader-only)
     logger = DetectionLogger(log_dir='logs')
-    
-    print("System initialized successfully!")
+    print("System initialized successfully in uploader-only detection mode.")
 
 # detection loop implementation moved earlier to avoid server-side drawing. See top of file for updated `detection_loop()`.
 
@@ -221,74 +162,22 @@ def create_error_frame(title, message):
     
     return frame
 
-def generate_frames():
-    """Generator function for video streaming"""
-    global output_frame, lock
-    
-    while True:
-        with lock:
-            if output_frame is None:
-                continue
-            
-            # Encode frame as JPEG
-            ret, buffer = cv2.imencode('.jpg', output_frame)
-            
-            if not ret:
-                continue
-            
-            frame_bytes = buffer.tobytes()
-        
-        # Yield frame in multipart format
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+# Removed MJPEG streaming generator — Python acts as a detection API only. Use POST /detect to submit frames.
 
 @app.route('/')
 def index():
     """API status endpoint"""
     return jsonify({
         "status": "NutriCycle Backend Running",
-        "detection_active": detection_active,
-        "frame_count": frame_count
+        "mode": "uploader-only",
+        "note": "POST images to /detect (gateway should forward uploads)"
     })
 
-@app.route('/video_feed')
-def video_feed():
-    """Video streaming endpoint"""
-    return Response(generate_frames(),
-                   mimetype='multipart/x-mixed-replace; boundary=frame')
+# /video_feed removed — Python server is detection API only. Use POST /detect for uploads.
 
-@app.route('/start_detection', methods=['POST'])
-def start_detection():
-    """Start detection process"""
-    global detection_active
-    
-    if detection_active:
-        return jsonify({"status": "already_running"})
-    
-    # Reset statistics when starting to avoid cumulative counting
-    if detector:
-        detector.reset_statistics()
-    
-    detection_active = True
-    
-    # Start detection thread
-    detection_thread = threading.Thread(target=detection_loop, daemon=True)
-    detection_thread.start()
-    
-    return jsonify({"status": "started"})
+# /start_detection removed — Python runs as a detection API. Use POST /detect for inference.
 
-@app.route('/stop_detection', methods=['POST'])
-def stop_detection():
-    """Stop detection process"""
-    global detection_active
-    
-    detection_active = False
-    
-    # Save logs
-    if logger:
-        logger.save()
-    
-    return jsonify({"status": "stopped"})
+# /stop_detection removed — not applicable in uploader-only mode.
 
 @app.route('/statistics')
 def get_statistics():
@@ -331,108 +220,33 @@ def start_batch():
         "start_time": batch_start_time.isoformat()
     })
 
-@app.route('/end_batch', methods=['POST'])
-def end_batch():
-    """End current batch and generate summary"""
-    global batch_active, batch_start_time, batch_detections, batch_history
-    
-    if not batch_active:
-        return jsonify({"status": "no_active_batch"})
-    
-    batch_end_time = datetime.now()
-    duration = (batch_end_time - batch_start_time).total_seconds()
-    
-    # Generate batch summary
-    contamination_types = {}
-    max_confidence = 0
-    total_items = len(batch_detections)
-    
-    for detection in batch_detections:
-        waste_type = detection['type']
-        contamination_types[waste_type] = contamination_types.get(waste_type, 0) + 1
-        max_confidence = max(max_confidence, detection['confidence'])
-    
-    batch_summary = {
-        'batch_id': len(batch_history) + 1,
-        'start_time': batch_start_time.isoformat(),
-        'end_time': batch_end_time.isoformat(),
-        'duration': round(duration, 2),
-        'total_items': total_items,
-        'contamination_types': contamination_types,
-        'max_confidence': round(max_confidence, 3)
-    }
-    
-    # Add to history (keep last N based on config)
-    batch_history.append(batch_summary)
-    if len(batch_history) > MAX_BATCH_HISTORY:
-        batch_history.pop(0)
-    
-    # Reset batch state
-    batch_active = False
-    batch_start_time = None
-    batch_detections = []
-    
-    print(f"Batch ended. Duration: {duration:.2f}s, Items: {total_items}")
-    
-    return jsonify({
-        "status": "ended",
-        "summary": batch_summary
-    })
+# batch endpoints removed
 
-@app.route('/batch_history')
-def get_batch_history():
-    """Get batch history (last 10 batches)"""
-    return jsonify({
-        "batches": batch_history,
-        "active_batch": batch_active,
-        "current_batch_items": len(batch_detections) if batch_active else 0
-    })
+# batch_history endpoint removed
 
 @app.route('/stream_status')
 def get_stream_status():
-    """Get current stream status and metrics"""
-    if stream_capture is None:
-        return jsonify({"error": "Stream not initialized"})
-    
-    # Get status from stream capture
-    if hasattr(stream_capture, 'get_status'):
-        status = stream_capture.get_status()
-    else:
-        # Webcam doesn't have status, provide basic info
-        status = {
-            'connected': stream_capture.is_open,
-            'fps': 30,
-            'latency': 0,
-            'quality': 'N/A',
-            'reconnect_attempts': 0
-        }
-    
-    # Add contamination count
-    contamination_count = sum([
-        detector.detection_counts.get('plastic', 0),
-        detector.detection_counts.get('metal', 0),
-        detector.detection_counts.get('paper', 0),
-        detector.detection_counts.get('unknown', 0)
-    ]) if detector else 0
-    
-    status['contamination_detected'] = contamination_count > 0
-    status['contamination_count'] = contamination_count
-    
+    """Return a simple status for uploader-only deployments."""
+    status = {
+        'mode': 'uploader-only',
+        'note': 'POST frames to /detect (gateway should forward uploads if in place)',
+        'contamination_count': sum([
+            detector.detection_counts.get('plastic', 0),
+            detector.detection_counts.get('metal', 0),
+            detector.detection_counts.get('paper', 0),
+            detector.detection_counts.get('unknown', 0)
+        ]) if detector else 0
+    }
+    status['contamination_detected'] = status['contamination_count'] > 0
     return jsonify(status)
 
 def cleanup():
     """Cleanup resources on shutdown"""
-    global detection_active, stream_capture, logger
-    
+    global logger
     print("Shutting down...")
-    detection_active = False
-    
-    if stream_capture:
-        stream_capture.stop()
-    
+    # Save logs
     if logger:
         logger.save()
-    
     print("Cleanup complete")
 
 if __name__ == '__main__':

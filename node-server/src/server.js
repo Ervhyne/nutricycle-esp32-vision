@@ -3,6 +3,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const http = require('http');
+const path = require('path');
 const routes = require('./routes');
 const sockets = require('./sockets');
 const { port, maxBodySize } = require('./config');
@@ -14,6 +15,9 @@ app.use(morgan('dev'));
 app.use(express.json({ limit: maxBodySize }));
 app.use(express.urlencoded({ extended: true, limit: maxBodySize }));
 app.use(express.raw({ type: ['image/*', 'application/octet-stream'], limit: maxBodySize }));
+
+// Serve public static files (viewer pages)
+app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // Wire routes
 app.use('/', routes);

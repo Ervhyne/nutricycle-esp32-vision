@@ -20,6 +20,15 @@
 #include "sdkconfig.h"
 #include "camera_index.h"
 #include "board_config.h"
+#include "uploader_settings.h"
+#include "uploader.h"
+#include "wifi_settings.h"
+#include "cJSON.h"
+#include <WiFi.h>
+
+#ifndef httpd_resp_send_400
+#define httpd_resp_send_400(req) httpd_resp_send_err((req), 400, "Bad Request")
+#endif
 
 #if defined(ARDUINO_ARCH_ESP32) && defined(CONFIG_ARDUHAL_ESP_LOG)
 #include "esp32-hal-log.h"
@@ -651,7 +660,610 @@ static esp_err_t win_handler(httpd_req_t *req) {
   return httpd_resp_send(req, NULL, 0);
 }
 
+static esp_err_t uploader_get_handler(httpd_req_t *req) {
+  log_i("HTTP: /uploader GET requested");
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+  uploader_settings_init();
+  String url = uploader_get_url();
+  String api = uploader_get_api_key();
+  uint32_t interval = uploader_get_interval_ms();
+
+  cJSON *root = cJSON_CreateObject();
+  cJSON_AddStringToObject(root, "url", url.c_str());
+  cJSON_AddStringToObject(root, "gateway", uploader_get_gateway().c_str());
+  cJSON_AddStringToObject(root, "api_key", api.c_str());
+  cJSON_AddNumberToObject(root, "interval_ms", interval);
+  // include device id and (optional) public stream URL
+  cJSON_AddStringToObject(root, "device_id", uploader_get_device_id().c_str());
+  cJSON_AddStringToObject(root, "stream_url", uploader_get_stream_url().c_str());
+
+  char *out = cJSON_PrintUnformatted(root);
+  httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
+  cJSON_free(out);
+  cJSON_Delete(root);
+  return ESP_OK;
+}
+
+static esp_err_t uploader_post_handler(httpd_req_t *req) {
+  log_i("HTTP: /uploader POST requested (len=%d)", req->content_len);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+  int len = req->content_len;
+  Serial.printf("[uploader] handler entered; content_len=%d\n", len);
+  if (len <= 0) {
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_send(req, "Bad Request", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  char *buf = (char*)malloc(len + 1);
+  if (!buf) {
+    Serial.println("[uploader] malloc failed");
+    return httpd_resp_send_500(req);
+  }
+  int ret = httpd_req_recv(req, buf, len);
+  if (ret <= 0) {
+    Serial.printf("[uploader] httpd_req_recv failed ret=%d\n", ret);
+    free(buf);
+    return httpd_resp_send_500(req);
+  }
+  buf[len] = 0;
+  Serial.printf("[uploader] body=%s\n", buf);
+
+  cJSON *root = cJSON_Parse(buf);
+  free(buf);
+  if (!root) {
+    Serial.println("[uploader] JSON parse failed");
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_send(req, "Bad Request - invalid JSON", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  cJSON *jurl = cJSON_GetObjectItem(root, "url");
+  cJSON *jgateway = cJSON_GetObjectItem(root, "gateway");
+  cJSON *japi = cJSON_GetObjectItem(root, "api_key");
+  cJSON *jinterval = cJSON_GetObjectItem(root, "interval_ms");
+  cJSON *jdevice = cJSON_GetObjectItem(root, "device_id");
+  cJSON *jstream = cJSON_GetObjectItem(root, "stream_url");
+
+  if (jurl && cJSON_IsString(jurl)) {
+    uploader_set_url(jurl->valuestring);
+    Serial.printf("HTTP /uploader: saved url='%s'\n", jurl->valuestring);
+  }
+  if (jgateway && cJSON_IsString(jgateway)) {
+    uploader_set_gateway(jgateway->valuestring);
+    Serial.printf("HTTP /uploader: saved gateway='%s'\n", jgateway->valuestring);
+  }
+  if (japi && cJSON_IsString(japi)) {
+    uploader_set_api_key(japi->valuestring);
+    Serial.printf("HTTP /uploader: saved api_key_len=%d\n", (int)strlen(japi->valuestring));
+  }
+  if (jinterval && cJSON_IsNumber(jinterval)) {
+    uploader_set_interval_ms((uint32_t)jinterval->valuedouble);
+    Serial.printf("HTTP /uploader: saved interval_ms=%u\n", (uint32_t)jinterval->valuedouble);
+  }
+  if (jdevice && cJSON_IsString(jdevice)) {
+    uploader_set_device_id(jdevice->valuestring);
+    Serial.printf("HTTP /uploader: saved device_id='%s'\n", jdevice->valuestring);
+  }
+  if (jstream && cJSON_IsString(jstream)) {
+    uploader_set_stream_url(jstream->valuestring);
+    Serial.printf("HTTP /uploader: saved stream_url='%s'\n", jstream->valuestring);
+  }
+
+  cJSON_Delete(root);
+
+  cJSON *out = cJSON_CreateObject();
+  cJSON_AddBoolToObject(out, "ok", true);
+  cJSON_AddStringToObject(out, "gateway", uploader_get_gateway().c_str());
+  cJSON_AddStringToObject(out, "device_id", uploader_get_device_id().c_str());
+  char *sout = cJSON_PrintUnformatted(out);
+  httpd_resp_send(req, sout, HTTPD_RESP_USE_STRLEN);
+  cJSON_free(sout);
+  cJSON_Delete(out);
+  return ESP_OK;
+}
+
+static esp_err_t wifi_get_handler(httpd_req_t *req) {
+  log_i("HTTP: /wifi GET requested");
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+  wifi_settings_init();
+  String ssid = wifi_get_ssid();
+  bool prov = wifi_is_provisioned();
+
+  cJSON *root = cJSON_CreateObject();
+  cJSON_AddStringToObject(root, "ssid", ssid.c_str());
+  cJSON_AddBoolToObject(root, "provisioned", prov);
+
+  char *out = cJSON_PrintUnformatted(root);
+  httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
+  cJSON_free(out);
+  cJSON_Delete(root);
+  return ESP_OK;
+}
+
+static esp_err_t wifi_post_handler(httpd_req_t *req) {
+  log_i("HTTP: /wifi POST requested (len=%d)", req->content_len);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+  int len = req->content_len;
+  if (len <= 0) {
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_send(req, "Bad Request", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  char *buf = (char*)malloc(len + 1);
+  if (!buf) return httpd_resp_send_500(req);
+  int ret = httpd_req_recv(req, buf, len);
+  if (ret <= 0) {
+    free(buf);
+    return httpd_resp_send_500(req);
+  }
+  buf[len] = 0;
+
+  // Debug: log raw request body to help diagnose provisioning issues
+  Serial.printf("HTTP: /wifi POST body: %s\n", buf);
+
+  cJSON *root = cJSON_Parse(buf);
+  free(buf);
+  if (!root) {
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_send(req, "Bad Request", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  cJSON *jssid = cJSON_GetObjectItem(root, "ssid");
+  cJSON *jpass = cJSON_GetObjectItem(root, "password");
+
+  // Accept SSID even when password is empty/missing (open Wi‑Fi networks or when user leaves password blank).
+  // Save only SSID & password if provided
+  if (jssid && cJSON_IsString(jssid)) {
+    const char *ssidstr = jssid->valuestring;
+    const char *passstr = (jpass && cJSON_IsString(jpass)) ? jpass->valuestring : "";
+    wifi_set_credentials(ssidstr, passstr);
+    Serial.printf("HTTP /wifi: provisioning saved (decoded) ssid='%s' pass_len=%d\n", ssidstr, (int)strlen(passstr));
+  }
+
+  cJSON_Delete(root);
+
+  const char *ok = "{\"ok\":true}";
+  httpd_resp_send(req, ok, strlen(ok));
+
+  // Attempt to reconnect in background (non-blocking short task)
+  xTaskCreatePinnedToCore([](void *param) {
+    (void)param;
+    String ssid = wifi_get_ssid();
+    String pass = wifi_get_pass();
+    if (ssid.length() == 0) vTaskDelete(NULL);
+
+    Serial.printf("[provision] Attempting reconnection to SSID: '%s' (len=%d) pass_len=%d\n", ssid.c_str(), (int)ssid.length(), (int)pass.length());
+
+    int n = WiFi.scanNetworks();
+    Serial.printf("[provision] Scan found %d networks\n", n);
+    for (int i = 0; i < n; i++) {
+      Serial.printf("  %d: '%s' (%d dBm)\n", i, WiFi.SSID(i).c_str(), WiFi.RSSI(i));
+    }
+
+    // Keep AP active during connect attempts
+    WiFi.disconnect(false); // don't erase stored AP config
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.begin(ssid.c_str(), pass.c_str());
+
+    unsigned long start = millis();
+    while (millis() - start < 10000) {
+      if (WiFi.status() == WL_CONNECTED) break;
+      vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.printf("[provision] Reconnected: %s\n", WiFi.localIP().toString().c_str());
+      // re-enable SoftAP so provisioning UI remains available
+      const char* apName = "NutriCycle-Setup";
+      WiFi.softAP(apName);
+      Serial.printf("[provision] SoftAP '%s' ensured for provisioning\n", apName);
+    } else {
+      Serial.println("[provision] Reconnect attempt failed");
+    }
+
+    vTaskDelete(NULL);
+  }, "reconnect", 4 * 1024, NULL, 1, NULL, 1);
+
+  return ESP_OK;
+}
+
+static esp_err_t reconnect_handler(httpd_req_t *req) {
+  log_i("HTTP: /reconnect POST requested");
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+  wifi_settings_init();
+  String ssid = wifi_get_ssid();
+  String pass = wifi_get_pass();
+
+  if (ssid.length() == 0) {
+    const char *err = "{\"ok\":false, \"error\": \"no_credentials\"}";
+    httpd_resp_send(req, err, strlen(err));
+    return ESP_OK;
+  }
+
+  // Attempt to connect (blocking up to 8s) to report immediate status
+  Serial.printf("[reconnect] Attempting connect to SSID: '%s' (len=%d) pass_len=%d\n", ssid.c_str(), (int)ssid.length(), (int)pass.length());
+
+  int n = WiFi.scanNetworks();
+  Serial.printf("[reconnect] Scan found %d networks\n", n);
+  for (int i = 0; i < n; i++) {
+    Serial.printf("  %d: '%s' (%d dBm)\n", i, WiFi.SSID(i).c_str(), WiFi.RSSI(i));
+  }
+
+  WiFi.disconnect(false); // do not erase credentials
+  // Keep AP active while attempting to connect so provisioning UI stays available
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.begin(ssid.c_str(), pass.c_str());
+
+  unsigned long start = millis();
+  while (millis() - start < 8000) {
+    if (WiFi.status() == WL_CONNECTED) break;
+    vTaskDelay(pdMS_TO_TICKS(250));
+  }
+
+  char out[256];
+  if (WiFi.status() == WL_CONNECTED) {
+    // Ensure SoftAP is still available for provisioning use
+    const char* apName = "NutriCycle-Setup";
+    WiFi.softAP(apName);
+    Serial.printf("[reconnect] Reconnected: %s; SoftAP '%s' ensured\n", WiFi.localIP().toString().c_str(), apName);
+    snprintf(out, sizeof(out), "{\"ok\":true, \"connected\":true, \"ip\":\"%s\"}", WiFi.localIP().toString().c_str());
+  } else {
+    Serial.println("[reconnect] Reconnect attempt failed");
+    snprintf(out, sizeof(out), "{\"ok\":true, \"connected\":false}");
+  }
+
+  httpd_resp_send(req, out, strlen(out));
+  return ESP_OK;
+}
+
+static esp_err_t provision_post_handler(httpd_req_t *req) {
+  log_i("HTTP: /provision POST requested");
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+  int len = req->content_len;
+  if (len <= 0) {
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_send(req, "Bad Request", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  char *buf = (char*)malloc(len + 1);
+  if (!buf) return httpd_resp_send_500(req);
+  int ret = httpd_req_recv(req, buf, len);
+  if (ret <= 0) { free(buf); return httpd_resp_send_500(req); }
+  buf[len] = 0;
+
+  Serial.printf("HTTP: /provision POST body: %s\n", buf);
+  cJSON *root = cJSON_Parse(buf);
+  free(buf);
+  if (!root) {
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_send(req, "Bad Request", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  cJSON *jssid = cJSON_GetObjectItem(root, "ssid");
+  cJSON *jpass = cJSON_GetObjectItem(root, "password");
+  cJSON *jurl = cJSON_GetObjectItem(root, "url");
+  cJSON *jgateway = cJSON_GetObjectItem(root, "gateway");
+  cJSON *japi = cJSON_GetObjectItem(root, "api_key");
+  cJSON *jinterval = cJSON_GetObjectItem(root, "interval_ms");
+  cJSON *jdevice = cJSON_GetObjectItem(root, "device_id");
+  cJSON *jstream = cJSON_GetObjectItem(root, "stream_url");
+
+  if (jssid && cJSON_IsString(jssid)) {
+    const char *ssidstr = jssid->valuestring;
+    const char *passstr = (jpass && cJSON_IsString(jpass)) ? jpass->valuestring : "";
+    wifi_set_credentials(ssidstr, passstr);
+    Serial.printf("/provision saved wifi (decoded) ssid='%s' pass_len=%d\n", ssidstr, (int)strlen(passstr));
+  }
+
+  if (jurl && cJSON_IsString(jurl)) {
+    uploader_set_url(jurl->valuestring);
+    Serial.printf("/provision saved uploader url='%s'\n", jurl->valuestring);
+  }
+  if (jgateway && cJSON_IsString(jgateway)) {
+    uploader_set_gateway(jgateway->valuestring);
+    Serial.printf("/provision saved uploader gateway='%s'\n", jgateway->valuestring);
+  }
+  if (japi && cJSON_IsString(japi)) {
+    uploader_set_api_key(japi->valuestring);
+    Serial.printf("/provision saved uploader api_key_len=%d\n", (int)strlen(japi->valuestring));
+  }
+  if (jinterval && cJSON_IsNumber(jinterval)) {
+    uploader_set_interval_ms((uint32_t)jinterval->valuedouble);
+    Serial.printf("/provision saved uploader interval_ms=%u\n", (uint32_t)jinterval->valuedouble);
+  }
+  if (jdevice && cJSON_IsString(jdevice)) {
+    uploader_set_device_id(jdevice->valuestring);
+    Serial.printf("/provision saved uploader device_id='%s'\n", jdevice->valuestring);
+  }
+  if (jstream && cJSON_IsString(jstream)) {
+    uploader_set_stream_url(jstream->valuestring);
+    Serial.printf("/provision saved uploader stream_url='%s'\n", jstream->valuestring);
+  }
+
+  cJSON_Delete(root);
+
+  const char *ok = "{\"ok\":true}";
+  httpd_resp_send(req, ok, strlen(ok));
+
+  // Background reconnect + ensure AP stays on
+  xTaskCreatePinnedToCore([](void *param) {
+    (void)param;
+    String ssid = wifi_get_ssid();
+    String pass = wifi_get_pass();
+    if (ssid.length() == 0) vTaskDelete(NULL);
+
+    Serial.printf("[provision] Starting reconnection attempt to '%s'\n", ssid.c_str());
+
+    int n = WiFi.scanNetworks();
+    Serial.printf("[provision] Scan found %d networks\n", n);
+    for (int i = 0; i < n; ++i) {
+      Serial.printf("[provision] scan[%d] SSID='%s' RSSI=%d secure=%d\n", i, WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.encryptionType(i));
+    }
+
+    WiFi.disconnect(false);
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.begin(ssid.c_str(), pass.c_str());
+
+    unsigned long start = millis();
+    unsigned long last_log = 0;
+    while (millis() - start < 15000) {
+      if (WiFi.status() == WL_CONNECTED) break;
+      if (millis() - last_log >= 2000) {
+        Serial.printf("[provision] waiting for connect... status=%d elapsed=%lums\n", WiFi.status(), millis() - start);
+        last_log = millis();
+      }
+      vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.printf("[provision] Reconnected: %s\n", WiFi.localIP().toString().c_str());
+      const char* apName = "NutriCycle-Setup";
+      WiFi.softAP(apName);
+      Serial.printf("[provision] SoftAP '%s' ensured for provisioning\n", apName);
+
+      // If uploader configured and wifi connected, start uploader task
+      uploader_settings_init();
+      if (uploader_is_configured()) {
+        Serial.println("[provision] Uploader configured; attempting to start uploader task");
+        startUploaderTask();
+      }
+    } else {
+      Serial.println("[provision] Reconnect attempt failed");
+    }
+
+    vTaskDelete(NULL);
+  }, "provision_reconnect", 6 * 1024, NULL, 1, NULL, 1);
+
+  Serial.println("[provision] Background reconnect task started");
+  return ESP_OK;
+}
+
+static esp_err_t start_ap_handler(httpd_req_t *req) {
+  log_i("HTTP: /start_ap POST requested");
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+  WiFi.mode(WIFI_AP_STA);
+  const char* apName = "NutriCycle-Setup";
+  WiFi.softAP(apName);
+  log_i("SoftAP '%s' started for provisioning", apName);
+  Serial.printf("HTTP /start_ap: SoftAP '%s' started\n", apName);
+
+  const char *ok = "{\"ok\":true}";
+  return httpd_resp_send(req, ok, strlen(ok));
+}
+
+static const char *setup_html = R"rawliteral(<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>NutriCycle Setup</title></head><body style=\"font-family:Arial,sans-serif;padding:12px\"> 
+<h2>NutriCycle - Device Setup</h2>
+<p>Use this page to configure Wi‑Fi and Node gateway settings. Enter the gateway host or full URL (e.g. <code>example.ngrok.io</code> or <code>https://example.ngrok.io</code>). The API key is optional and used if your gateway requires it. Leave Gateway blank to rely on direct MJPEG streaming and device mapping on the gateway. Recommended: use the uploader mode (enter gateway) so the device can POST frames to the gateway which forwards detection requests.</p>
+<form id="provisionForm">
+  <h3>Wi-Fi</h3>
+  <label>SSID: <input id="ssid" name="ssid" /></label><br/><br/>
+  <label>Password: <input id="password" name="password" type="password" /></label><br/><br/>
+
+  <h3>Uploader</h3>
+  <label>Gateway host or URL: <input id="gateway" name="gateway" style="width:80%" placeholder="example.ngrok.io or https://example.ngrok.io" /></label>
+  <small>Enter the Node gateway host (e.g. <code>192.168.1.50:3000</code>) or full URL (e.g. <code>https://example.ngrok.io</code>). The device will post frames to <code>&lt;gateway&gt;/upload</code>. Use the API key below if your gateway requires it (header <code>X-API-KEY</code>).</small><br/><br/>
+  <label>API Key: <input id="api_key" name="api_key" /></label><br/><br/>
+  <label>Device ID: <input id="device_id" name="device_id" /></label>
+  <small>(defaults to device MAC address; used to register the stream on the gateway)</small><br/><br/>
+  <label>Stream URL (optional): <input id="stream_url" name="stream_url" style="width:80%" placeholder="https://your-ngrok-url.ngrok.io/stream" /></label>
+  <small>Optional public MJPEG stream URL (ngrok or router). If provided, the device will attempt to register this URL with the Node gateway on save.</small><br/><br/>
+  <label>Interval (ms): <input id="interval_ms" name="interval_ms" type="number" /></label>
+  <small>Uploader frame POST interval (default 500ms). If you want live MJPEG via Node proxy, leave Gateway blank and ensure Node has device mapping.</small><br/><br/>
+
+  <button type="button" onclick="saveUploaderOnly()">Save Uploader Only</button>
+  <button type="button" onclick="saveProvision()">Save & Apply</button>
+</form>
+<hr/>
+<div id="msg"></div>
+<script>
+async function load() {
+  try {
+    const r1 = await fetch('/wifi');
+    const w = await r1.json();
+    document.getElementById('ssid').value = w.ssid || '';
+
+    const r2 = await fetch('/uploader');
+    const u = await r2.json();
+    document.getElementById('gateway').value = u.gateway || u.url || '';
+    document.getElementById('api_key').value = u.api_key||'';
+    document.getElementById('device_id').value = u.device_id||'';
+    document.getElementById('stream_url').value = u.stream_url||'';
+    document.getElementById('interval_ms').value = u.interval_ms||500;
+
+    // NOTE: single-button provision function is available: saveProvision()
+  } catch (e) { console.error(e); }
+}
+async function saveWifi() {
+  const ssid = document.getElementById('ssid').value;
+  const password = document.getElementById('password').value;
+  await fetch('/wifi', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ssid,password}) });
+  document.getElementById('msg').innerText = 'Wi-Fi saved. Device will try to connect.';
+}
+async function saveUploader() {
+  const gateway = document.getElementById('gateway').value;
+  const api_key = document.getElementById('api_key').value;
+  const device_id = document.getElementById('device_id').value;
+  const stream_url = document.getElementById('stream_url').value;
+  const interval_ms = Number(document.getElementById('interval_ms').value) || 500;
+  try {
+    const r = await fetch('/uploader', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({gateway,api_key,device_id,stream_url,interval_ms}) });
+    const text = await r.text();
+    if (!r.ok) {
+      document.getElementById('msg').innerText = `Uploader save failed: ${r.status} ${text}`;
+      return {ok:false, status:r.status, text};
+    }
+    document.getElementById('msg').innerText = 'Uploader settings saved: ' + text;
+    return {ok:true, status:r.status, text};
+  } catch (e) {
+    document.getElementById('msg').innerText = 'Uploader save error: ' + e.toString();
+    return {ok:false, status:0, text:e.toString()};
+  }
+}
+async function saveUploaderOnly() {
+  document.getElementById('msg').innerText = 'Saving uploader (no wifi change)...';
+  await saveUploader();
+}
+async function reconnect() {
+  document.getElementById('msg').innerText = 'Attempting reconnect...';
+  try {
+    const r = await fetch('/reconnect', { method: 'POST' });
+    const j = await r.json();
+    if (j && j.connected) {
+      document.getElementById('msg').innerText = 'Reconnected! IP: ' + (j.ip || '');
+    } else {
+      document.getElementById('msg').innerText = 'Reconnect failed. Status: ' + (j && j.connected ? 'connected' : 'not connected');
+    }
+  } catch (e) {
+    document.getElementById('msg').innerText = 'Reconnect error';
+  }
+}
+// Single-button provision function (JS)
+async function saveProvision() {
+  const ssid = document.getElementById('ssid').value;
+  const password = document.getElementById('password').value;
+  const gateway = document.getElementById('gateway').value;
+  const api_key = document.getElementById('api_key').value;
+  const device_id = document.getElementById('device_id').value;
+  const stream_url = document.getElementById('stream_url').value;
+  const interval_ms = Number(document.getElementById('interval_ms').value) || 500;
+
+  document.getElementById('msg').innerText = 'Saving uploader settings...';
+  try {
+    // First save uploader settings (so they persist even if reconnect interrupts the AP)
+    const up = await saveUploader();
+    if (!up.ok) {
+      document.getElementById('msg').innerText = `Uploader save failed: ${up.status} ${up.text}`;
+      return;
+    }
+
+    document.getElementById('msg').innerText = 'Uploader saved. Saving Wi‑Fi and applying...';
+
+    // Then save wifi (this will trigger reconnect) — send minimal body to /provision
+    try {
+      const provResp = await fetch('/provision', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ssid,password}) });
+      let provText = '';
+      try { provText = await provResp.text(); } catch(e) {}
+      if (!provResp.ok) {
+        document.getElementById('msg').innerText = `Provision save failed: ${provResp.status} ${provText}`;
+        return;
+      }
+
+      // provision responded ok; now check reconnect status
+      document.getElementById('msg').innerText = 'Saved. Attempting reconnect...';
+      try {
+        const r2 = await fetch('/reconnect', { method: 'POST' });
+        const j2 = await r2.json();
+        if (j2 && j2.connected) {
+          document.getElementById('msg').innerText = 'Reconnected! IP: ' + (j2.ip || '');
+        } else {
+          document.getElementById('msg').innerText = 'Saved. Reconnect failed or pending; SoftAP remains active for provisioning.';
+        }
+      } catch (e) { document.getElementById('msg').innerText = 'Saved, but reconnect probe failed'; }
+
+      // Attempt stream registration (best-effort) using saved gateway
+      if (gateway && stream_url && device_id) {
+        try {
+          let base = gateway;
+          if (!/^https?:\/\//.test(base)) base = 'http://' + base;
+          base = (new URL(base)).origin;
+          const regUrl = `${base}/devices/${encodeURIComponent(device_id)}/register_stream`;
+          const rreg = await fetch(regUrl, { method: 'POST', headers: {'Content-Type':'application/json', 'X-API-KEY': api_key || ''}, body: JSON.stringify({ url: stream_url }) });
+          if (rreg.ok) {
+            document.getElementById('msg').innerText += ' Stream registered with gateway.';
+          } else {
+            document.getElementById('msg').innerText += ' Stream registration failed.';
+          }
+        } catch (e) {
+          document.getElementById('msg').innerText += ' Stream registration error.';
+        }
+      }
+
+    } catch (e) {
+      document.getElementById('msg').innerText = 'Error saving provisioning: ' + e.toString();
+      return;
+    }
+
+  } catch (e) {
+    document.getElementById('msg').innerText = 'Error saving uploader settings: ' + e.toString();
+  }
+}
+
+async function startAP() {
+    document.getElementById('msg').innerText = 'Starting AP...';
+    try {
+      const r = await fetch('/start_ap', { method: 'POST' });
+      const j = await r.json();
+      if (j && j.ok) document.getElementById('msg').innerText = 'AP started. Connect to 192.168.4.1';
+      else document.getElementById('msg').innerText = 'Failed to start AP';
+    } catch (e) { document.getElementById('msg').innerText = 'Error starting AP'; }
+  }
+  function injectOpenAPButton() {
+    if (!document.getElementById('openApBtn')) {
+      let b = document.createElement('button');
+      b.type = 'button';
+      b.id = 'openApBtn';
+      b.innerText = 'Open Setup AP';
+      b.style.marginLeft = '8px';
+      b.onclick = startAP;
+      let wf = document.getElementById('wifiForm'); if (wf) wf.appendChild(b);
+    }
+  }
+  window.addEventListener('load', () => { load(); injectOpenAPButton(); });
+</script>
+</body>
+</html>)rawliteral";
+
+static esp_err_t setup_handler(httpd_req_t *req) {
+  log_i("HTTP: /setup requested");
+  httpd_resp_set_type(req, "text/html");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  return httpd_resp_send(req, setup_html, strlen(setup_html));
+}
+
 static esp_err_t index_handler(httpd_req_t *req) {
+  // If device is not provisioned, redirect to the setup page to make provisioning UX easier
+  wifi_settings_init();
+  if (!wifi_is_provisioned()) {
+    log_i("Index requested while not provisioned - serving setup page");
+    return setup_handler(req);
+  }
+
   httpd_resp_set_type(req, "text/html");
   httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
   sensor_t *s = esp_camera_sensor_get();
@@ -671,7 +1283,7 @@ static esp_err_t index_handler(httpd_req_t *req) {
 
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 16;
+  config.max_uri_handlers = 32; // allow extra handlers for settings
 
   httpd_uri_t index_uri = {
     .uri = "/",
@@ -790,6 +1402,83 @@ void startCameraServer() {
 #endif
   };
 
+  /*
+   * Simple JSON API endpoints to view & update uploader settings (upload URL, API key, interval)
+   * GET  /uploader -> returns { url, api_key, interval_ms }
+   * POST /uploader -> accepts JSON { url, api_key, interval_ms }
+   */
+
+  httpd_uri_t uploader_get_uri = {
+    .uri = "/uploader",
+    .method = HTTP_GET,
+    .handler = uploader_get_handler,
+    .user_ctx = NULL
+  };
+
+  httpd_uri_t uploader_post_uri = {
+    .uri = "/uploader",
+    .method = HTTP_POST,
+    .handler = uploader_post_handler,
+    .user_ctx = NULL
+  };
+
+  // Wi-Fi endpoints (GET returns stored SSID/provision state, POST saves credentials)
+  httpd_uri_t wifi_get_uri = {
+    .uri = "/wifi",
+    .method = HTTP_GET,
+    .handler = wifi_get_handler,
+    .user_ctx = NULL
+  };
+
+  httpd_uri_t wifi_post_uri = {
+    .uri = "/wifi",
+    .method = HTTP_POST,
+    .handler = wifi_post_handler,
+    .user_ctx = NULL
+  };
+
+  // Register uploader and wifi endpoints
+  httpd_register_uri_handler(camera_httpd, &uploader_get_uri);
+  httpd_register_uri_handler(camera_httpd, &uploader_post_uri);
+  httpd_register_uri_handler(camera_httpd, &wifi_get_uri);
+  httpd_register_uri_handler(camera_httpd, &wifi_post_uri);
+
+  // Combined provisioning endpoint (single button config)
+  httpd_uri_t provision_post_uri = {
+    .uri = "/provision",
+    .method = HTTP_POST,
+    .handler = provision_post_handler,
+    .user_ctx = NULL
+  };
+  httpd_register_uri_handler(camera_httpd, &provision_post_uri);
+
+  // Setup page for provisioning and uploader settings
+  httpd_uri_t setup_uri = {
+    .uri = "/setup",
+    .method = HTTP_GET,
+    .handler = setup_handler,
+    .user_ctx = NULL
+  };
+  httpd_register_uri_handler(camera_httpd, &setup_uri);
+
+  // Reconnect endpoint to attempt Wi-Fi connection immediately
+  httpd_uri_t reconnect_uri = {
+    .uri = "/reconnect",
+    .method = HTTP_POST,
+    .handler = reconnect_handler,
+    .user_ctx = NULL
+  };
+  httpd_register_uri_handler(camera_httpd, &reconnect_uri);
+
+  // Endpoint to reopen SoftAP for provisioning while STA is active
+  httpd_uri_t startap_uri = {
+    .uri = "/start_ap",
+    .method = HTTP_POST,
+    .handler = start_ap_handler,
+    .user_ctx = NULL
+  };
+  httpd_register_uri_handler(camera_httpd, &startap_uri);
+
   httpd_uri_t pll_uri = {
     .uri = "/pll",
     .method = HTTP_GET,
@@ -831,6 +1520,16 @@ void startCameraServer() {
     httpd_register_uri_handler(camera_httpd, &greg_uri);
     httpd_register_uri_handler(camera_httpd, &pll_uri);
     httpd_register_uri_handler(camera_httpd, &win_uri);
+
+    // Ensure uploader, wifi & provisioning endpoints are registered after server start
+    httpd_register_uri_handler(camera_httpd, &uploader_get_uri);
+    httpd_register_uri_handler(camera_httpd, &uploader_post_uri);
+    httpd_register_uri_handler(camera_httpd, &wifi_get_uri);
+    httpd_register_uri_handler(camera_httpd, &wifi_post_uri);
+    httpd_register_uri_handler(camera_httpd, &provision_post_uri);
+    httpd_register_uri_handler(camera_httpd, &setup_uri);
+    httpd_register_uri_handler(camera_httpd, &reconnect_uri);
+    httpd_register_uri_handler(camera_httpd, &startap_uri);
   }
 
   config.server_port += 1;

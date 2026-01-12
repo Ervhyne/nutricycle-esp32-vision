@@ -70,11 +70,14 @@ Detection logs are saved in `logs/` directory:
 - Format: `detections_YYYYMMDD_HHMMSS.json`
 - Contains timestamps, object types, confidence scores, and bounding boxes
 
-## ESP32 Integration (Future)
+## ESP32 Integration (Modes)
 
-To switch from webcam to ESP32-CAM:
-1. Update `WebcamCapture` to use ESP32 stream URL
-2. No other changes needed!
+The server can operate in two modes:
+
+- **Uploader mode** (recommended and now default): Python will run in uploader-only mode by default and will not attempt to connect directly to ESP32 or webcam. Disable `AUTO_CONNECT_ESP32` in `config.py` (or environment) to keep this behavior. In this mode devices POST frames to the Node gateway (`/upload`) and Node forwards frames to Python's `/detect` endpoint; Python performs inference and returns JSON metadata. This avoids direct ESP32 pulls and aligns with the gateway/uploader architecture.
+- **Auto-ESP32 mode** (optional): If you explicitly enable `USE_ESP32 = True` and `AUTO_CONNECT_ESP32 = True` in `config.py`, Python will attempt to open the ESP32 MJPEG stream at startup.
+
+To switch to uploader mode, set `AUTO_CONNECT_ESP32 = False` in your `config.py` or export it as an environment variable before starting `app.py`.
 
 ## Troubleshooting
 

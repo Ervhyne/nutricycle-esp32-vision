@@ -29,6 +29,10 @@ How it works:
 - The uploader captures a frame (JPEG) using `esp_camera_fb_get()` and sends it as raw bytes with `Content-Type: application/octet-stream` to `UPLOAD_URL`.
 - The gateway should forward the frame to the Python AI server and broadcast detection metadata back to clients.
 
+Provisioning & runtime configuration:
+- If the device cannot connect to Wi‑Fi it will start a SoftAP (`NutriCycle-Setup`) and host a setup page at `http://192.168.4.1/setup` where you can set Wi‑Fi credentials and uploader settings (URL, API key, interval). Settings persist in flash and do not require reflashing.
+- The uploader uses `UPLOAD_URL` at runtime; to change between local LAN and ngrok you can update the uploader URL on the device via the setup page or by re-flashing `uploader_config.h`.
+
 Notes:
 - Test first on the same LAN (set `UPLOAD_URL` to your PC LAN IP) - ensure firewall allows port 3000.
 - When using ngrok, set `UPLOAD_URL` to the ngrok URL. Keep upload interval and JPEG quality low for reliability.
