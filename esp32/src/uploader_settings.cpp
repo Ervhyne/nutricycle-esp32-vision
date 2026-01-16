@@ -66,12 +66,56 @@ void uploader_set_interval_ms(uint32_t ms) {
   prefs.putUInt("interval", ms);
 }
 
+// Queue settings
+bool uploader_is_queue_enabled() {
+  return prefs.getUInt("queue_en", UPLOAD_QUEUE_ENABLED) ? true : false;
+}
+
+void uploader_set_queue_enabled(bool en) {
+  prefs.putUInt("queue_en", en ? 1 : 0);
+}
+
+int uploader_get_queue_size() {
+  int v = (int)prefs.getUInt("queue_sz", UPLOAD_QUEUE_SIZE);
+  if (v < 1) v = 1;
+  return v;
+}
+
+void uploader_set_queue_size(int size) {
+  if (size < 1) size = 1;
+  prefs.putUInt("queue_sz", (uint32_t)size);
+}
+
 void uploader_set_device_id(const char *id) {
   if (id && strlen(id) > 0) prefs.putString("device_id", String(id));
 }
 
 void uploader_set_stream_url(const char *url) {
   if (url && strlen(url) > 0) prefs.putString("stream_url", String(url));
+}
+
+// Frame size and JPEG quality for uploads
+int uploader_get_frame_size() {
+  // Defaults to UPLOAD_FRAME_SIZE from uploader_config.h
+  return (int)prefs.getUInt("frame_sz", (uint32_t)UPLOAD_FRAME_SIZE);
+}
+
+void uploader_set_frame_size(int framesize) {
+  if (framesize < 0) framesize = UPLOAD_FRAME_SIZE;
+  prefs.putUInt("frame_sz", (uint32_t)framesize);
+}
+
+int uploader_get_jpeg_quality() {
+  int q = (int)prefs.getUInt("jpeg_q", (uint32_t)UPLOAD_JPEG_QUALITY);
+  if (q < 0) q = 0;
+  if (q > 63) q = 63;
+  return q;
+}
+
+void uploader_set_jpeg_quality(int q) {
+  if (q < 0) q = 0;
+  if (q > 63) q = 63;
+  prefs.putUInt("jpeg_q", (uint32_t)q);
 }
 
 String uploader_get_gateway() {

@@ -10,5 +10,7 @@ module.exports = {
   pythonDetectUrl,
   pythonBaseUrl,
   apiKey: process.env.API_KEY || null,
-  maxBodySize: process.env.MAX_BODY_SIZE || '5mb'
+  maxBodySize: process.env.MAX_BODY_SIZE || '5mb',
+  // Public base URL (set this to your ngrok/http public url, e.g. https://abc123.ngrok.io)
+  publicBase: process.env.PUBLIC_BASE_URL || null
 };

@@ -36,7 +36,7 @@ except Exception:
 USE_ESP32 = globals().get('USE_ESP32', False)
 ESP32_STREAM_URL = globals().get('ESP32_STREAM_URL', None)
 MODEL_PATH = globals().get('MODEL_PATH', 'backend/models/best.pt')
-CONFIDENCE_THRESHOLD = globals().get('CONFIDENCE_THRESHOLD', 0.5)
+CONFIDENCE_THRESHOLD = globals().get('CONFIDENCE_THRESHOLD', 0.25)
 FILTER_NON_VEGETABLES = globals().get('FILTER_NON_VEGETABLES', True)
 MAX_BATCH_HISTORY = globals().get('MAX_BATCH_HISTORY', 10)
 HOST = globals().get('HOST', '127.0.0.1')
@@ -103,9 +103,13 @@ def detect_image():
             scaled.append(d_copy)
 
         elapsed_ms = int((time.time() - start_time) * 1000)
-        print(f"[detect] processed in {elapsed_ms} ms, detections={len(scaled)}")
+        print(f"[detect] processed in {elapsed_ms} ms, detections={len(scaled)}, image={img.shape[1]}x{img.shape[0]}")
 
-        return jsonify({"detections": scaled})
+        return jsonify({
+            "detections": scaled,
+            "image_width": img.shape[1],
+            "image_height": img.shape[0]
+        })
     except Exception as e:
         # Log full exception for debugging
         import traceback

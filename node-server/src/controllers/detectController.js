@@ -37,24 +37,39 @@ async function upload(req, res) {
       }
 
       if (streamHeader && /^https?:\/\//.test(streamHeader)) {
+        // Clean IPv4-mapped IPv6 hostnames like '::ffff:192.168.1.27' which can break upstream parsing
+        const cleanedStream = streamHeader.replace(/::ffff:(\d+\.\d+\.\d+\.\d+)/g, '$1').trim();
         if (deviceIdHeader) {
-          deviceStreamStore.set(deviceIdHeader, streamHeader);
-          console.log(`[upload] registered stream URL for device ${deviceIdHeader} -> ${streamHeader}`);
+          deviceStreamStore.set(deviceIdHeader, cleanedStream);
+          console.log(`[upload] registered stream URL for device ${deviceIdHeader} -> ${cleanedStream}`);
         } else {
           // fallback: register by uploader source IP
           const ipKey = req.ip || req.connection.remoteAddress || null;
           if (ipKey) {
-            deviceStreamStore.setByIp(ipKey, streamHeader);
-            console.log(`[upload] registered stream URL for ip ${ipKey} -> ${streamHeader}`);
+            deviceStreamStore.setByIp(ipKey, cleanedStream);
+            console.log(`[upload] registered stream URL for ip ${ipKey} -> ${cleanedStream}`);
           }
         }
       } else {
         // If no explicit stream URL, and no mapping exists, we can guess a likely stream URL on the same LAN
         const ipKey = req.ip || req.connection.remoteAddress || null;
         if (ipKey && !deviceStreamStore.getByIp(ipKey)) {
-          const guessed = `http://${ipKey}:81/stream`;
-          deviceStreamStore.setByIp(ipKey, guessed);
-          console.log(`[upload] guessed and registered stream URL for ip ${ipKey} -> ${guessed}`);
+          // Normalize ipKey if it's an IPv4-mapped IPv6 literal
+          const cleanedIp = String(ipKey).replace(/^::ffff:/, '');
+          const guessed = `http://${cleanedIp}:81/stream`;
+          deviceStreamStore.setByIp(cleanedIp, guessed);
+          console.log(`[upload] guessed and registered stream URL for ip ${cleanedIp} -> ${guessed}`);
+
+          // If the device provided a device-id header, also register the guessed URL under that id
+          try {
+            const deviceIdHeader = req.header('x-device-id') || null;
+            if (deviceIdHeader && !deviceStreamStore.get(deviceIdHeader)) {
+              deviceStreamStore.set(deviceIdHeader, guessed);
+              console.log(`[upload] guessed and registered stream URL for device ${deviceIdHeader} -> ${guessed}`);
+            }
+          } catch (e) {
+            console.warn('[upload] failed to register guessed URL under device id', e && e.message ? e.message : e);
+          }
         }
       }
     } catch (e) {
@@ -66,17 +81,77 @@ async function upload(req, res) {
       const snapshotStore = require('../services/snapshotStore');
       const imageResizer = require('../services/imageResizer');
       const resized = await imageResizer.resizeTo320(buffer);
-      snapshotStore.setLatest(resized, 'image/jpeg');
+      const deviceIdHeader = req.header('x-device-id') || null;
+      snapshotStore.setLatest(resized, 'image/jpeg', deviceIdHeader);
+
+      // Broadcast latest frame to connected frontends (binary + metadata)
+      try {
+        const sockets = require('../sockets');
+        const deviceIdHeader = req.header('x-device-id') || null;
+        const frameId = `${deviceIdHeader || 'unknown'}-${Date.now()}`;
+        sockets.broadcastFrame(frameId, Buffer.from(resized));
+        sockets.broadcastMeta(frameId, { deviceId: deviceIdHeader || null, size: Buffer.from(resized).length, ts: Date.now() });
+      } catch (e) {
+        console.warn('[upload] failed to broadcast frame', e && e.message ? e.message : e);
+      }
+
     } catch (e) {
       console.warn('[upload] snapshot store/resizer failed:', e.message || e);
-      try { require('../services/snapshotStore').setLatest(buffer, 'image/jpeg'); } catch (ex) {}
+      try { 
+        require('../services/snapshotStore').setLatest(buffer, 'image/jpeg'); 
+        // Broadcast original buffer if resize failed
+        try {
+          const sockets = require('../sockets');
+          const deviceIdHeader = req.header('x-device-id') || null;
+          const frameId = `${deviceIdHeader || 'unknown'}-${Date.now()}`;
+          sockets.broadcastFrame(frameId, Buffer.from(buffer));
+          sockets.broadcastMeta(frameId, { deviceId: deviceIdHeader || null, size: Buffer.from(buffer).length, ts: Date.now() });
+        } catch (e2) { console.warn('[upload] failed to broadcast original frame', e2 && e2.message ? e2.message : e2) }
+      } catch (ex) {}
     }
-    const data = await pythonClient.detect(buffer); // send original to python for best accuracy
+    // Enqueue detection work into the bounded worker pool so Python is not overwhelmed
+    try {
+      const detectQueue = require('../services/detectQueue');
+      const stats = detectQueue.getStats();
+      if (stats.queued >= stats.maxQueue) {
+        console.warn('[upload] detect queue is full, rejecting request');
+        return res.status(503).json({ ok: false, error: 'detect_queue_full' });
+      }
 
-    // Broadcast detections to connected clients
-    sockets.broadcast('detections', data);
+      detectQueue.enqueue(buffer)
+        .then((data) => {
+          console.log('[upload] detect job completed, broadcasting detections');
+          sockets.broadcast('detections', data);
+        })
+        .catch((err) => {
+          // If enqueue or detect job fails, log warning
+          console.warn('[upload] detect job failed or was rejected', err && err.message ? err.message : err);
+        });
+      // Immediately acknowledge receipt and queueing
+    } catch (e) {
+      console.warn('[upload] failed to enqueue detect job', e && e.message ? e.message : e);
+      return res.status(500).json({ ok: false, error: 'detect_enqueue_failed' });
+    }
 
-    return res.json({ ok: true, detections: data.detections || [] });
+    // If deviceId present and we have a configured public base URL (e.g., ngrok), return a public stream URL
+    let publicStreamUrl = null;
+    try {
+      const { publicBase } = require('../config');
+      const deviceIdHeader = req.header('x-device-id') || null;
+      if (publicBase && deviceIdHeader) {
+        const base = publicBase.replace(/\/$/, '');
+        publicStreamUrl = `${base}/device_stream?device_id=${encodeURIComponent(deviceIdHeader)}`;
+        console.log(`[upload] public stream URL for ${deviceIdHeader} -> ${publicStreamUrl}`);
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    // Quickly acknowledge receipt so the device can resume without waiting for detection
+    const resp = { ok: true, queued: true };
+    if (publicStreamUrl) resp.publicStreamUrl = publicStreamUrl;
+
+    return res.json(resp);
   } catch (err) {
     console.error('Upload controller error:', err);
     // include stack if available for diagnostics

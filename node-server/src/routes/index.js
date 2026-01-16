@@ -106,29 +106,88 @@ router.get('/device_stream', async (req, res) => {
     const target = `${espUrl}${qsFiltered}`;
     console.log(`[deviceStreamProxy] ${req.ip || req.connection.remoteAddress} -> ${target}`);
 
-    const resp = await axios.get(target, {
-      responseType: 'stream',
-      timeout: 0,
-      headers: { Accept: 'multipart/x-mixed-replace' }
-    });
+    try {
+      const resp = await axios.get(target, {
+        responseType: 'stream',
+        timeout: 0,
+        headers: { Accept: 'multipart/x-mixed-replace' }
+      });
 
-    const contentType = resp.headers && resp.headers['content-type'] ? resp.headers['content-type'] : 'multipart/x-mixed-replace; boundary=frame';
-    res.setHeader('Content-Type', contentType);
+      const contentType = resp.headers && resp.headers['content-type'] ? resp.headers['content-type'] : 'multipart/x-mixed-replace; boundary=frame';
+      res.setHeader('Content-Type', contentType);
 
-    // Diagnostic logging: show upstream status and content-type
-    console.log(`[deviceStreamProxy] upstream status=${resp.status} content-type=${contentType}`);
+      // Diagnostic logging: show upstream status and content-type
+      console.log(`[deviceStreamProxy] upstream status=${resp.status} content-type=${contentType}`);
 
-    // Pipe directly — keeps MJPEG frames intact and minimal overhead
-    resp.data.pipe(res);
+      // Pipe directly — keeps MJPEG frames intact and minimal overhead
+      resp.data.pipe(res);
 
-    resp.data.on('error', err => {
-      console.error('[deviceStreamProxy] stream error', err && err.message ? err.message : err);
-      try { res.end(); } catch (e) {}
-    });
+      resp.data.on('error', err => {
+        console.error('[deviceStreamProxy] stream error', err && err.message ? err.message : err);
+        try { res.end(); } catch (e) {}
+      });
 
-    resp.data.on('close', () => {
-      console.log('[deviceStreamProxy] upstream stream closed')
-    });
+      resp.data.on('close', () => {
+        console.log('[deviceStreamProxy] upstream stream closed')
+      });
+      return;
+    } catch (upErr) {
+      console.warn('[deviceStreamProxy] upstream connect failed, falling back to snapshot MJPEG stream', upErr && upErr.message ? upErr.message : upErr);
+
+      // Fallback: serve MJPEG based on latest snapshotStore frames
+      const snapshotStore = require('../services/snapshotStore');
+      res.setHeader('Content-Type', 'multipart/x-mixed-replace; boundary=frame');
+      res.setHeader('Cache-Control', 'no-cache');
+
+      // helper to write a single frame
+      function writeFrame(latest) {
+        if (!latest || !latest.buf) return;
+        try {
+          res.write(`--frame\r\n`);
+          res.write(`Content-Type: ${latest.contentType}\r\n`);
+          res.write(`Content-Length: ${latest.buf.length}\r\n\r\n`);
+          res.write(latest.buf);
+          res.write('\r\n');
+        } catch (e) {
+          // client may have disconnected
+        }
+      }
+
+      // Write initial frame if available
+      const initial = snapshotStore.getLatest();
+      if (initial) writeFrame(initial);
+      else {
+        // If no snapshot exists yet, send a tiny heartbeat so browser knows the connection is live
+        try { res.write(`--frame\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n`); } catch (e) {}
+      }
+
+      // Subscribe to updates and stream them
+      const onUpdate = (frame) => {
+        // If request provided device_id, filter by it
+        const deviceIdFilter = req.query && req.query.device_id ? req.query.device_id : null;
+        if (deviceIdFilter && frame.deviceId && frame.deviceId !== deviceIdFilter) return;
+        writeFrame(frame);
+      };
+
+      snapshotStore.onUpdate(onUpdate);
+
+      // Periodic keepalive: re-send the latest frame every 5s so clients don't time out when no new frames arrive
+      let keepalive = null;
+      keepalive = setInterval(() => {
+        try {
+          const latest = snapshotStore.getLatest();
+          if (latest) writeFrame(latest);
+        } catch (e) { }
+      }, 5000);
+
+      // Clean up on client disconnect
+      req.on('close', () => {
+        try { snapshotStore.offUpdate && snapshotStore.offUpdate(onUpdate); } catch (e) {}
+        try { if (keepalive) clearInterval(keepalive); } catch (e) {}
+      });
+
+      return;
+    }
   } catch (err) {
     // Detailed error logging to help diagnose network / device issues
     if (err && err.response) {
@@ -200,7 +259,9 @@ router.post('/devices/:id/register_stream', requireApiKey, async (req, res) => {
     const url = req.body && req.body.url;
     if (!id || !url || !/^https?:\/\//.test(url)) return res.status(400).json({ error: 'invalid' });
     deviceStreamStore.set(id, url);
-    return res.json({ ok: true, id, url });
+    // Return normalized stored url so caller gets the cleaned form (e.g. ::ffff removed)
+    const stored = deviceStreamStore.get(id);
+    return res.json({ ok: true, id, url: stored });
   } catch (err) {
     console.error('[devices/register_stream] failed', err && err.message ? err.message : err);
     return res.status(500).json({ error: 'internal_error' });
@@ -343,6 +404,17 @@ router.post('/start_detection', async (req, res) => {
   } catch (err) {
     console.error('[proxy] start_detection failed', err && err.message ? err.message : err);
     return res.status(502).json({ error: 'bad_gateway', details: err.message || String(err) });
+  }
+});
+
+// Debug: detect queue stats
+router.get('/debug/detect_queue', (req, res) => {
+  try {
+    const detectQueue = require('../services/detectQueue');
+    return res.json({ ok: true, stats: detectQueue.getStats() });
+  } catch (err) {
+    console.error('[debug] detect_queue failed', err && err.message ? err.message : err);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
   }
 });
 

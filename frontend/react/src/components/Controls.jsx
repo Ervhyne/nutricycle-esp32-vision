@@ -77,13 +77,9 @@ export default function Controls({ onUseUrl, onUseIp, onUseDefault }) {
 
   function handleUseDeviceSelection() {
     if (!selectedDevice) return
-    const dev = devices.find(d => d.id === selectedDevice)
-    if (dev && dev.url) {
-      onUseUrl(ensureUrl(dev.url))
-      setMsg(`Using registered device url for ${selectedDevice}`)
-    } else {
-      setMsg('Selected device has no registered URL')
-    }
+    // Prefer using the registered device_id proxy so frontends and sockets don't need direct IP access
+    onUseUrl(`/device_stream?device_id=${encodeURIComponent(selectedDevice)}`)
+    setMsg(`Using device_id proxy for ${selectedDevice}`)
   }
 
   // Fetch normalized target (URL or target_ip) and show in UI so user can copy/open it

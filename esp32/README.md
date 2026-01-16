@@ -21,7 +21,9 @@ A new optional uploader task is available to POST frames from the ESP32 to the N
 Configuration (edit `src/uploader_config.h`):
 
 - `UPLOAD_ENABLED` - 1 to enable automatic uploads, 0 to disable
-- `UPLOAD_INTERVAL_MS` - Upload interval in milliseconds
+- `UPLOAD_INTERVAL_MS` - Upload interval in milliseconds (default 2000ms to improve reliability over tunnels)
+- `UPLOAD_FRAME_SIZE` - Default frame size for uploads (e.g., `FRAMESIZE_QQVGA` to reduce bandwidth)
+- `UPLOAD_JPEG_QUALITY` - JPEG quality for uploads (0 = best, 63 = worst; higher numbers reduce payload size)
 - `UPLOAD_URL` - Full URL of the gateway `/upload` endpoint (e.g. `http://<pc-ip>:3000/upload`)
 - `UPLOAD_API_KEY` - API key header value to include in `X-API-KEY` (leave empty if not used)
 

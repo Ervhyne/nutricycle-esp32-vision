@@ -47,6 +47,12 @@ class WasteDetector:
                 print("Loading pretrained YOLOv8n model...")
                 self.model = YOLO('yolov8n.pt')
                 print("Note: Using pretrained model. Train custom model for waste classification.")
+
+            # Debug: print available class names for the loaded model
+            try:
+                print(f"Model classes: {self.model.names}")
+            except Exception:
+                pass
         except Exception as e:
             print(f"Error loading model: {e}")
             raise
@@ -124,6 +130,11 @@ class WasteDetector:
                     'bbox': [int(x1), int(y1), int(x2), int(y2)],
                     'timestamp': datetime.now().isoformat()
                 }
+                # Debug: print raw detection info to help trace missing classes/confidence
+                try:
+                    print(f"[debug detection] class={class_name} mapped={waste_type} conf={confidence:.2f} bbox={detection['bbox']}")
+                except Exception:
+                    pass
                 all_detections.append(detection)
         
         # Filter detections based on mode

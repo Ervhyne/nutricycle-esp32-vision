@@ -17,6 +17,18 @@ String uploader_get_stream_url();
 void uploader_set_device_id(const char *id);
 void uploader_set_stream_url(const char *url);
 
+// Optional upload capture parameters
+int uploader_get_frame_size();
+void uploader_set_frame_size(int framesize);
+int uploader_get_jpeg_quality();
+void uploader_set_jpeg_quality(int q);
+
+// Upload queue settings
+bool uploader_is_queue_enabled();
+void uploader_set_queue_enabled(bool en);
+int uploader_get_queue_size();
+void uploader_set_queue_size(int size);
+
 // Gateway host (host or full URL) used to construct upload endpoint
 String uploader_get_gateway();
 void uploader_set_gateway(const char *gateway);

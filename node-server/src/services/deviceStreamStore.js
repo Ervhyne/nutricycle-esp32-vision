@@ -46,12 +46,15 @@ function normalizeIp(ip) {
 function normalizeUrl(u) {
   if (!u) return u;
   try {
+    // Quick replacement for common pattern first to avoid bracket edge-cases
+    const quick = u.replace(/::ffff:(\d+\.\d+\.\d+\.\d+)/g, '$1');
+
     // Try parsing directly first
     let parsed;
-    try { parsed = new URL(u); } catch (e) {
+    try { parsed = new URL(quick); } catch (e) {
       // If parsing fails (likely because host contains unbracketed IPv6 literal),
       // try to bracket the IPv6-style host (e.g. ::ffff:1.2.3.4)
-      const bracketed = u.replace(/^([a-z]+:\/\/)(::ffff:[0-9.]+)(:\d+)?(\/.*|$)/i, (m, scheme, host, port, rest) => {
+      const bracketed = quick.replace(/^([a-z]+:\/\/)(::[0-9a-fA-F:.]+)(:\d+)?(\/.*|$)/i, (m, scheme, host, port, rest) => {
         return `${scheme}[${host}]${port || ''}${rest || ''}`;
       });
       parsed = new URL(bracketed);
@@ -64,6 +67,9 @@ function normalizeUrl(u) {
       const port = parsed.port ? `:${parsed.port}` : '';
       return `${parsed.protocol}//${ipv4}${port}${parsed.pathname || ''}${parsed.search || ''}`;
     }
+
+    // If quick already removed mapping, return parsed normalized url
+    return `${parsed.protocol}//${parsed.hostname}${parsed.port ? `:${parsed.port}` : ''}${parsed.pathname || ''}${parsed.search || ''}`;
   } catch (e) {
     // Fallback: if hostname couldn't be parsed, do a safe textual replacement for ::ffff:ipv4 patterns
     try {
@@ -73,7 +79,6 @@ function normalizeUrl(u) {
       return u;
     }
   }
-  return u;
 }
 
 function load() {
@@ -93,7 +98,8 @@ function load() {
           newKey = `ip:${cleanIp}`;
         }
         const newUrl = entry.url ? normalizeUrl(entry.url) : entry.url;
-        store.set(newKey, { url: newUrl, lastSeen: entry.lastSeen || Date.now() });
+        // Persist minimal info only (url); ignore lastSeen for now to simplify DB migration later
+        store.set(newKey, { url: newUrl });
         if (newKey !== k || (entry.url && newUrl !== entry.url)) migrated = true;
       }
       lastSaved = parsed.saved || Date.now();
@@ -113,7 +119,8 @@ function load() {
 function set(deviceId, url) {
   if (!deviceId || !url) return false;
   const normalizedUrl = normalizeUrl(url);
-  store.set(deviceId, { url: normalizedUrl, lastSeen: Date.now() });
+  // Store minimal information for now: only url. lastSeen was removed per requirements.
+  store.set(deviceId, { url: normalizedUrl });
   persist();
   return true;
 }
@@ -155,7 +162,7 @@ function setRssiByDeviceId(id, rssi) {
 function list() {
   const out = {};
   for (const [k, v] of store.entries()) {
-    out[k] = { url: v.url, lastSeen: v.lastSeen, rssi: v.rssi };
+    out[k] = { url: v.url, rssi: v.rssi };
   }
   return out;
 }
